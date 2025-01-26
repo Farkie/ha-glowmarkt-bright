@@ -1,0 +1,14 @@
+{
+  "domain": "glowmarkt",
+  "name": "Glowmarkt Energy",
+  "config_flow": true,
+  "documentation": "https://github.com/farkie/hass-glowmarkt-bright",
+  "issues": "https://github.com/farkie/hass-glowmarkt/issues",
+  "requirements": [],
+  "ssdp": [],
+  "zeroconf": [],
+  "homekit": {},
+  "dependencies": [],
+  "codeowners": ["@farkie"],
+  "version": "0.1.0"
+}
