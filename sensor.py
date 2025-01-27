@@ -1,8 +1,9 @@
 """Sensor platform for Glowmarkt integration."""
-from datetime import datetime, timedelta
 import logging
 import traceback
+import homeassistant.util.dt as dt_util
 
+from datetime import datetime, timedelta
 from homeassistant.components.recorder import get_instance
 from homeassistant.components.recorder.statistics import (
     async_import_statistics,
@@ -28,7 +29,6 @@ from homeassistant.helpers.update_coordinator import (
     CoordinatorEntity,
     DataUpdateCoordinator,
 )
-import homeassistant.util.dt as dt_util
 
 from .const import DOMAIN
 from .glowmarkt_api import GlowmarktAPI
@@ -65,7 +65,6 @@ SENSOR_TYPES = {
         "state_class": "total",
     },
 }
-
 
 KWH_TO_CUBIC_METERS = 0.0923
 
@@ -110,11 +109,11 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
         for sensor in entities:
             await inject_historical_data(hass, sensor)
 
-    # Run immediately and then every 30 minutes
-    await update_historical_data(None)
-    async_track_time_interval(
-        hass, update_historical_data, timedelta(minutes=30)
-    )
+#     # Run immediately and then every 30 minutes
+#     await update_historical_data(None)
+#     async_track_time_interval(
+#         hass, update_historical_data, timedelta(minutes=30)
+#     )
 
 async def inject_historical_data(hass, sensor):
     """Inject historical data for all available readings."""
