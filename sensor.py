@@ -9,6 +9,7 @@ from homeassistant.components.recorder.statistics import (
     async_import_statistics,
     StatisticData,
     StatisticMetaData,
+    get_last_statistics,
 )
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -80,7 +81,7 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
         _LOGGER,
         name="glowmarkt_sensor",
         update_method=async_update_data,
-        update_interval=timedelta(minutes=30),
+        update_interval=timedelta(minutes=20),
     )
 
     await coordinator.async_config_entry_first_refresh()
@@ -107,17 +108,31 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
     async def update_historical_data(now):
         """Update historical data for all sensors."""
         for sensor in entities:
-            await inject_historical_data(hass, sensor)
+            await inject_historical_data(hass, sensor, now)
 
-#     # Run immediately and then every 30 minutes
-#     await update_historical_data(None)
-#     async_track_time_interval(
-#         hass, update_historical_data, timedelta(minutes=30)
-#     )
+    # Run immediately and then every 30 minutes
+    await update_historical_data(None)
+    async_track_time_interval(
+        hass, update_historical_data, timedelta(minutes=20)
+    )
 
-async def inject_historical_data(hass, sensor):
+from datetime import datetime
+import time
+
+from datetime import datetime
+import time
+
+from datetime import datetime
+import time
+
+from datetime import datetime
+import time
+
+from datetime import datetime
+import time
+
+async def inject_historical_data(hass, sensor, timestamp):
     """Inject historical data for all available readings."""
-    _LOGGER.debug(f"Injecting historical data for {sensor.name}")
 
     if not sensor.coordinator or not sensor.coordinator.data:
         _LOGGER.error(f"No coordinator data available for {sensor.name}")
@@ -129,38 +144,6 @@ async def inject_historical_data(hass, sensor):
     resource_type = sensor._sensor_type.split('_')[0]
     data_type = sensor._sensor_type.split('_')[1]
 
-    cumulative_sum = 0
-    last_reset = None
-
-    # Sort readings by datetime
-    sorted_readings = sorted(data[resource_type], key=lambda x: x["datetime"])
-
-    for reading in sorted_readings:
-        timestamp = dt_util.as_utc(datetime.strptime(reading["datetime"], "%Y-%m-%d %H:%M:%S"))
-        value = reading.get(data_type)
-        if value is not None and value > 0:
-            if data_type == "cost":
-                value = value / 100  # Convert pence to pounds
-
-            cumulative_sum += value
-
-            statistics.append(
-                StatisticData(
-                    start=timestamp,
-                    state=value,
-                    sum=cumulative_sum,
-                    last_reset=timestamp
-                )
-            )
-
-            _LOGGER.debug(f"Inserting: {statistics}")
-
-    if not statistics:
-        _LOGGER.warning(f"No valid statistics generated for {sensor.name}")
-        return
-
-    _LOGGER.debug(f"Inserting {len(statistics)} historical records for {sensor.name}")
-
     metadata = StatisticMetaData(
         has_mean=False,
         has_sum=True,
@@ -170,10 +153,70 @@ async def inject_historical_data(hass, sensor):
         unit_of_measurement=sensor._attr_native_unit_of_measurement,
     )
 
+    # Fetch existing statistics
+    statistic_id = f"sensor.{DOMAIN}_{resource_type}_{data_type}"
+    existing_stats = await get_instance(hass).async_add_executor_job(
+        get_last_statistics, hass, 1000, statistic_id, True, {"state", "sum", "start"}
+    )
+
+    # Initialize last known sum and timestamp
+    last_known_sum = 0
+    last_processed_timestamp = None
+    if existing_stats and statistic_id in existing_stats:
+        existing_stats_list = existing_stats[statistic_id]
+        if existing_stats_list:
+            last_stat = existing_stats_list[-1]
+            last_known_sum = last_stat["sum"]
+            last_processed_timestamp = last_stat["start"]
+
+    # Sort readings by datetime in ascending order
+    sorted_readings = sorted(data[resource_type], key=lambda x: x["datetime"])
+
+    for reading in sorted_readings:
+        timestamp = dt_util.as_utc(datetime.strptime(reading["datetime"], "%Y-%m-%d %H:%M:%S"))
+        timestamp_unix = timestamp.timestamp()
+
+        # Skip entries that are older than or equal to the last processed timestamp
+        if last_processed_timestamp and timestamp_unix <= last_processed_timestamp:
+            continue
+
+        value = reading.get(data_type)
+
+        if value is not None:
+            if data_type == "cost":
+                value = value / 100  # Convert pence to pounds
+            elif data_type == "consumption":
+                value = round(value, 4)  # Round consumption to 4 decimal places
+
+            # Calculate the new sum by adding the new value to the last known sum
+            new_sum = round(last_known_sum + value, 4)  # Round the sum to 4 decimal places for consumption
+
+            statistics.append(
+                StatisticData(
+                    start=timestamp,
+                    state=value,  # The hourly value
+                    sum=new_sum,  # The new cumulative sum
+                    last_reset=None  # Set to None as this is cumulative data
+                )
+            )
+
+            if resource_type == "electricity" and data_type == "consumption":
+                _LOGGER.debug(f"Electricity Consumption - Timestamp: {timestamp}, Hourly Value: {value}, New Sum: {new_sum}, Last Known Sum: {last_known_sum}")
+
+            # Update last known sum for the next iteration
+            last_known_sum = new_sum
+            last_processed_timestamp = timestamp_unix
+
+    if not statistics:
+        _LOGGER.debug(f"No new statistics to add for {sensor.name}")
+        return
+
     try:
         async_import_statistics(hass, metadata, statistics)
+        _LOGGER.debug(f"Successfully added {len(statistics)} new statistic entries for {sensor.name}")
     except Exception as e:
         _LOGGER.error(f"Error inserting historical data for {sensor.name}: {str(e)}")
+
 
 class GlowmarktSensor(CoordinatorEntity, SensorEntity):
     """Representation of a Glowmarkt sensor."""

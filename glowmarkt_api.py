@@ -1,5 +1,6 @@
 import logging
 import aiohttp
+import asyncio
 import async_timeout
 from datetime import datetime, timedelta
 
@@ -15,6 +16,7 @@ class GlowmarktAPI:
         self.password = password
         self.token = None
         self.session = None
+        self.initial_load_completed = False  # Add this flag
 
     async def authenticate(self):
         """Authenticate with the Glowmarkt API."""
@@ -38,11 +40,65 @@ class GlowmarktAPI:
                 _LOGGER.error("Error authenticating with Glowmarkt API: %s", err)
                 raise
 
+    async def send_catchup_request(self):
+        _LOGGER.debug("Fetching hourly readings for the last 24 hours from Glowmarkt API")
+        if not self.token:
+            await self.authenticate()
+
+        url = f"{self.BASE_URL}/virtualentity"
+        headers = {
+            "applicationId": APPLICATION_ID,
+            "token": self.token,
+            "Content-Type": "application/json"
+        }
+
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with async_timeout.timeout(10):
+                    async with session.get(url, headers=headers) as response:
+                        response.raise_for_status()
+                        virtual_entities = await response.json()
+                        _LOGGER.debug(f"Retrieved virtual entities: {virtual_entities}")
+
+                readings = {"gas": [], "electricity": []}
+
+                for entity in virtual_entities:
+                    _LOGGER.debug(f"Processing entity: {entity}")
+                    if "resources" not in entity:
+                        _LOGGER.warning(f"Unexpected entity structure: {entity}")
+                        continue
+
+                    for resource in entity["resources"]:
+                        _LOGGER.debug(f"Processing resource: {resource}")
+                        resource_id = resource.get("resourceId")
+                        resource_name = resource.get("name", "").lower()
+
+                        readings_url = f"{self.BASE_URL}/resource/{resource_id}/catchup"
+                        _LOGGER.debug(f"Sending Catchup to URL: {readings_url}")
+
+                        try:
+                            async with async_timeout.timeout(10):
+                                async with session.get(readings_url, headers=headers) as readings_response:
+                                    readings_response.raise_for_status()
+                                    await readings_response.json()
+                        except aiohttp.ClientResponseError as err:
+                            _LOGGER.error(f"Error fetching readings for resource {resource_id}: {err}")
+                            continue
+            except aiohttp.ClientError as err:
+                _LOGGER.error(f"Error fetching data from Glowmarkt API: {err}")
+                raise
+
+        # Need to wait 2 minutes for the catchup requests to complete
+        await asyncio.sleep(120)
+
     async def get_hourly_readings(self):
         """Get hourly readings for the last 24 hours from the Glowmarkt API."""
         _LOGGER.debug("Fetching hourly readings for the last 24 hours from Glowmarkt API")
         if not self.token:
             await self.authenticate()
+
+        if self.initial_load_completed:
+            await self.send_catchup_request()
 
         url = f"{self.BASE_URL}/virtualentity"
         headers = {
@@ -118,7 +174,8 @@ class GlowmarktAPI:
                             _LOGGER.error(f"Error fetching readings for resource {resource_id}: {err}")
                             continue
 
-                _LOGGER.debug(f"Final readings data: {readings}")
+                _LOGGER.debug(f"Final readings data passed to HA: {readings}")
+                self.initial_load_completed = True
                 return readings
 
             except aiohttp.ClientError as err:
