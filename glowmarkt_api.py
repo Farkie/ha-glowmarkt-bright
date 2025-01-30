@@ -141,10 +141,10 @@ class GlowmarktAPI:
                             continue
 
                         readings_url = f"{self.BASE_URL}/resource/{resource_id}/readings"
-                        end_date = datetime.utcnow().replace(minute=0, second=0, microsecond=0) - timedelta(hours=1)
-                        start_date = end_date - timedelta(hours=23)
+                        end_date = datetime.utcnow().replace(minute=0, second=0, microsecond=0) - timedelta(hours=0)
+                        start_date = end_date - timedelta(hours=24)
                         params = {
-                            "period": "PT1H",
+                            "period": "PT30M",
                             "function": "sum",
                             "from": start_date.strftime("%Y-%m-%dT%H:%M:%S"),
                             "to": end_date.strftime("%Y-%m-%dT%H:%M:%S")

@@ -2,6 +2,7 @@
 import logging
 import traceback
 import homeassistant.util.dt as dt_util
+from collections import defaultdict
 
 from datetime import datetime, timedelta
 from homeassistant.components.recorder import get_instance
@@ -116,106 +117,115 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
         hass, update_historical_data, timedelta(minutes=20)
     )
 
-from datetime import datetime
-import time
+async def inject_historical_data(hass: HomeAssistant, sensor, timestamp):
+    """Inject historical data for all available readings, aggregating to hourly intervals."""
 
-from datetime import datetime
-import time
-
-from datetime import datetime
-import time
-
-from datetime import datetime
-import time
-
-from datetime import datetime
-import time
-
-async def inject_historical_data(hass, sensor, timestamp):
-    """Inject historical data for all available readings."""
+    _LOGGER.debug(f"Starting inject_historical_data for {sensor.name}")
 
     if not sensor.coordinator or not sensor.coordinator.data:
         _LOGGER.error(f"No coordinator data available for {sensor.name}")
         return
 
     data = sensor.coordinator.data
+    _LOGGER.debug(f"Raw data: {data}")
 
     resource_type = sensor._sensor_type.split('_')[0]
     data_type = sensor._sensor_type.split('_')[1]
+
+    statistic_id = f"{sensor.entity_id}"
+    _LOGGER.debug(f"Statistic ID: {statistic_id}")
 
     metadata = StatisticMetaData(
         has_mean=False,
         has_sum=True,
         name=sensor._attr_name,
         source="recorder",
-        statistic_id=f"sensor.{DOMAIN}_{resource_type}_{data_type}",
+        statistic_id=statistic_id,
         unit_of_measurement=sensor._attr_native_unit_of_measurement,
     )
+    _LOGGER.debug(f"Metadata: {metadata}")
 
-    statistic_id = f"sensor.{DOMAIN}_{resource_type}_{data_type}"
+    try:
+        existing_stats = await get_instance(hass).async_add_executor_job(
+            get_last_statistics, hass, 1000, statistic_id, True, {"state", "sum", "start"}
+        )
+        _LOGGER.debug(f"Existing stats: {existing_stats}")
 
-    # Fetch all existing statistics
-    existing_stats = await get_instance(hass).async_add_executor_job(
-        get_last_statistics, hass, 1000, statistic_id, False, {"state", "sum", "start"}
-    )
+        existing_stats_dict = {
+            dt_util.as_utc(datetime.fromtimestamp(stat["start"])): stat
+            for stat in existing_stats.get(statistic_id, [])
+        }
+        _LOGGER.debug(f"Existing stats dict: {existing_stats_dict}")
 
-    last_known_sum = 0
-    last_processed_timestamp = None
+        sorted_readings = sorted(data[resource_type], key=lambda x: x["datetime"])
+        _LOGGER.debug(f"Sorted readings: {sorted_readings}")
 
-    if existing_stats and statistic_id in existing_stats:
-        existing_stats_list = existing_stats[statistic_id]
-        if existing_stats_list:
-            last_stat = existing_stats_list[-1]
+        hourly_data = defaultdict(float)
+        for reading in sorted_readings:
+            timestamp = dt_util.as_utc(datetime.strptime(reading["datetime"], "%Y-%m-%d %H:%M:%S"))
+            hourly_timestamp = timestamp.replace(minute=0, second=0, microsecond=0)
+            value = reading.get(data_type)
+
+            if value is not None:
+                if data_type == "cost":
+                    value = value / 100  # Convert pence to pounds
+                hourly_data[hourly_timestamp] += value
+        _LOGGER.debug(f"Hourly data: {dict(hourly_data)}")
+
+        statistics = []
+        last_known_sum = 0
+
+        if existing_stats_dict:
+            last_stat = max(existing_stats_dict.values(), key=lambda x: x["start"])
             last_known_sum = round(last_stat["sum"], 3)
-            last_processed_timestamp = last_stat["start"]
 
-    _LOGGER.debug(f"Starting with last known sum: {last_known_sum}")
+        _LOGGER.debug(f"Starting with last known sum: {last_known_sum}")
 
-    # Sort readings by datetime
-    sorted_readings = sorted(data[resource_type], key=lambda x: x["datetime"])
+        for timestamp, value in sorted(hourly_data.items()):
+            value = round(value, 3)
+            _LOGGER.debug(f"Processing timestamp: {timestamp}, value: {value}")
 
-    statistics = []
+            if timestamp in existing_stats_dict:
+                existing_value = existing_stats_dict[timestamp]["state"]
+                existing_sum = existing_stats_dict[timestamp]["sum"]
+                _LOGGER.debug(f"Existing data found - value: {existing_value}, sum: {existing_sum}")
 
-    for reading in sorted_readings:
-        timestamp = dt_util.as_utc(datetime.strptime(reading["datetime"], "%Y-%m-%d %H:%M:%S"))
-        timestamp_float = timestamp.timestamp()
-        value = reading.get(data_type)
+                if abs(existing_value - value) > 0.001:
+                    _LOGGER.debug(f"Value changed: {existing_value} -> {value}")
+                    sum_diff = value - existing_value
+                    new_sum = round(last_known_sum + sum_diff, 3)
+                else:
+                    _LOGGER.debug("Value unchanged, keeping existing sum")
+                    new_sum = existing_sum
+            else:
+                _LOGGER.debug("New timestamp, adding to last known sum")
+                new_sum = round(last_known_sum + value, 3)
 
-        if value is not None:
-            if data_type == "cost":
-                value = round(value / 100, 3)  # Convert pence to pounds and round
-            elif data_type == "consumption":
-                value = round(float(value), 3)  # Round to 3 decimal places
-
-            # Only add if it's a new reading
-            if last_processed_timestamp is None or timestamp_float > last_processed_timestamp:
-                new_sum = round(last_known_sum + value, 3)  # Round to 3 decimal places
-
-                statistics.append(
-                    StatisticData(
-                        start=timestamp,
-                        state=value,
-                        sum=new_sum,
-                        last_reset=None
-                    )
+            statistics.append(
+                StatisticData(
+                    start=timestamp,
+                    state=value,
+                    sum=new_sum,
                 )
-                _LOGGER.debug(f"Added: Timestamp: {timestamp}, Value: {value}, New Sum: {new_sum}")
+            )
+            _LOGGER.debug(f"Added/Updated statistic: Timestamp: {timestamp}, Value: {value}, New Sum: {new_sum}")
 
-                # Update last known sum and timestamp
-                last_known_sum = new_sum
-                last_processed_timestamp = timestamp_float
+            last_known_sum = new_sum
 
-    if statistics:
-        try:
-            async_import_statistics(hass, metadata, statistics)
-            _LOGGER.debug(f"Successfully added {len(statistics)} new statistic entries for {sensor.name}")
-        except Exception as e:
-            _LOGGER.error(f"Error inserting historical data for {sensor.name}: {str(e)}")
-    else:
-        _LOGGER.debug(f"No new statistics to add for {sensor.name}")
+        _LOGGER.debug(f"Final statistics to be imported: {statistics}")
+
+        if statistics:
+            await hass.async_add_executor_job(
+                async_import_statistics, hass, metadata, statistics
+            )
+            _LOGGER.debug(f"Successfully added/updated {len(statistics)} statistic entries for {sensor.name}")
+        else:
+            _LOGGER.debug(f"No new statistics to add for {sensor.name}")
+
+    except Exception as e:
+        _LOGGER.error(f"Error processing historical data for {sensor.name}: {str(e)}", exc_info=True)
 
     _LOGGER.info(f"Completed processing data for {sensor.name}")
-
 class GlowmarktSensor(CoordinatorEntity, SensorEntity):
     """Representation of a Glowmarkt sensor."""
 
