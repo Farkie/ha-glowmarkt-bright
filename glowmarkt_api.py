@@ -88,8 +88,8 @@ class GlowmarktAPI:
                 _LOGGER.error(f"Error fetching data from Glowmarkt API: {err}")
                 raise
 
-        # Need to wait 2 minutes for the catchup requests to complete
-        await asyncio.sleep(120)
+        # Need to wait 5 seconds for the catchup requests to complete
+        await asyncio.sleep(5)
 
     async def get_hourly_readings(self):
         """Get hourly readings for the last 24 hours from the Glowmarkt API."""
@@ -142,7 +142,7 @@ class GlowmarktAPI:
 
                         readings_url = f"{self.BASE_URL}/resource/{resource_id}/readings"
                         end_date = datetime.utcnow().replace(minute=0, second=0, microsecond=0) - timedelta(hours=0)
-                        start_date = end_date - timedelta(hours=24)
+                        start_date = end_date - timedelta(hours=48)
                         params = {
                             "period": "PT30M",
                             "function": "sum",

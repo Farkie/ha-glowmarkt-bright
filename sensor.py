@@ -74,8 +74,14 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
     """Set up the Glowmarkt sensor platform."""
     api = GlowmarktAPI(config_entry.data["username"], config_entry.data["password"])
 
+    entities = []
+
     async def async_update_data():
-        return await api.get_hourly_readings()
+        data = await api.get_hourly_readings()
+        if data:
+            for sensor in entities:
+                await inject_historical_data(hass, sensor, dt_util.now())
+        return data
 
     coordinator = DataUpdateCoordinator(
         hass,
@@ -87,15 +93,11 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
 
     await coordinator.async_config_entry_first_refresh()
 
-    readings = coordinator.data
+    if not coordinator.data:
+        raise ConfigEntryNotReady("No data received from Glowmarkt API")
 
-    if not readings:
-        _LOGGER.error("No readings data available")
-        return
-
-    entities = []
     for resource_type in ["gas", "electricity"]:
-        if resource_type in readings:
+        if resource_type in coordinator.data:
             for data_type in ["consumption", "cost"]:
                 sensor_type = f"{resource_type}_{data_type}"
                 sensor_info = SENSOR_TYPES.get(sensor_type)
@@ -105,17 +107,23 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
 
     async_add_entities(entities)
 
+    # Schedule the first historical data injection
+    for sensor in entities:
+        await inject_historical_data(hass, sensor, dt_util.now())
+
+    return True
+
     # Schedule the inject_historical_data function to run periodically
     async def update_historical_data(now):
         """Update historical data for all sensors."""
         for sensor in entities:
             await inject_historical_data(hass, sensor, now)
 
-    # Run immediately and then every 30 minutes
-    await update_historical_data(None)
-    async_track_time_interval(
-        hass, update_historical_data, timedelta(minutes=20)
-    )
+#     # Run immediately and then every 30 minutes
+        await update_historical_data(None)
+        async_track_time_interval(
+            hass, update_historical_data, timedelta(minutes=20)
+        )
 
 async def inject_historical_data(hass: HomeAssistant, sensor, timestamp):
     """Inject historical data for all available readings, aggregating to hourly intervals."""
@@ -126,6 +134,7 @@ async def inject_historical_data(hass: HomeAssistant, sensor, timestamp):
         _LOGGER.error(f"No coordinator data available for {sensor.name}")
         return
 
+    await sensor.coordinator.async_request_refresh()
     data = sensor.coordinator.data
     _LOGGER.debug(f"Raw data: {data}")
 
@@ -201,14 +210,17 @@ async def inject_historical_data(hass: HomeAssistant, sensor, timestamp):
                 _LOGGER.debug("New timestamp, adding to last known sum")
                 new_sum = round(last_known_sum + value, 3)
 
-            statistics.append(
-                StatisticData(
-                    start=timestamp,
-                    state=value,
-                    sum=new_sum,
+            if (value > 0):
+                statistics.append(
+                    StatisticData(
+                        start=timestamp,
+                        state=value,
+                        sum=new_sum,
+                    )
                 )
-            )
-            _LOGGER.debug(f"Added/Updated statistic: Timestamp: {timestamp}, Value: {value}, New Sum: {new_sum}")
+                _LOGGER.debug(f"Added/Updated statistic: Timestamp: {timestamp}, Value: {value}, New Sum: {new_sum}")
+            else:
+                _LOGGER.debug(f"Ignored 0 value statistic: Timestamp: {timestamp}, Value: {value}")
 
             last_known_sum = new_sum
 
@@ -226,6 +238,7 @@ async def inject_historical_data(hass: HomeAssistant, sensor, timestamp):
         _LOGGER.error(f"Error processing historical data for {sensor.name}: {str(e)}", exc_info=True)
 
     _LOGGER.info(f"Completed processing data for {sensor.name}")
+
 class GlowmarktSensor(CoordinatorEntity, SensorEntity):
     """Representation of a Glowmarkt sensor."""
 
@@ -244,6 +257,10 @@ class GlowmarktSensor(CoordinatorEntity, SensorEntity):
         else:
             self._attr_native_unit_of_measurement = sensor_info["unit"]
 
+    async def async_update(self):
+        """Update the sensor."""
+        await self.coordinator.async_request_refresh()
+
     @property
     def native_value(self):
         """Return the state of the sensor."""
@@ -252,6 +269,9 @@ class GlowmarktSensor(CoordinatorEntity, SensorEntity):
 
         resource_type = self._sensor_type.split('_')[0]
         data_type = self._sensor_type.split('_')[1]
+
+        if resource_type not in self.coordinator.data or not self.coordinator.data[resource_type]:
+            return None
 
         latest_reading = max(self.coordinator.data[resource_type], key=lambda x: x["datetime"])
         value = latest_reading.get(data_type)
@@ -263,7 +283,6 @@ class GlowmarktSensor(CoordinatorEntity, SensorEntity):
             return round(value / 100, 2)  # Convert pence to pounds
         else:
             return round(value, 3)
-
     @property
     def extra_state_attributes(self):
         """Return the state attributes of the sensor."""
